@@ -8,32 +8,31 @@ import random
 # =========================================================
 
 # ---------- PATHS ----------
-FG_PATH = "backend/test/LS20251222120154.png"      # RGBA foreground
+FG_PATH = "backend/test/LS20251222120154.png"
 BG_PATH = "backend/test/screenshots_20251218_145223_500.00m_1X_p0_v0_a0.png"
-OUTPUT_DIR = "backend/test/dataset_output"
+OUTPUT_DIR = "assets/testimg"
 
 # ---------- DATASET ----------
-DATASET_COUNT = 50        # number of images to generate
+DATASET_COUNT = 50
 
-# ---------- FOREGROUND SCALE ----------
-MIN_SCALE_RATIO = 0.001   # 0.1%
-START_SCALE_FACTOR = 0.5  # half of fit-to-frame size
+# ---------- SCALE ----------
+MIN_SCALE_RATIO = 0.001
+START_SCALE_FACTOR = 0.5
 
-# ---------- FOREGROUND RANDOMIZATION (GENERATION MODE) ----------
-FG_RANDOM = {
-    "brightness": (-40, 40),
-    "contrast": (0.7, 1.4),
-    "blur": (0, 7)   # odd enforced
-}
-
-# ---------- BACKGROUND ADJUSTMENT LIMITS (SETUP MODE) ----------
-BG_LIMITS = {
+# ---------- FILTER LIMITS ----------
+FILTER_LIMITS = {
     "brightness": (-100, 100),
     "contrast": (0.5, 2.0),
     "blur": (0, 15)
 }
 
-# ---------- UI ----------
+# ---------- GENERATION (GLOBAL IMAGE VARIATION) ----------
+GLOBAL_RANDOM = {
+    "brightness": (-40, 40),
+    "contrast": (0.8, 1.3),
+    "blur": (0, 7)
+}
+
 INITIAL_OBJECTS = 3
 
 # =========================================================
@@ -46,7 +45,7 @@ fg_rgba = cv2.imread(FG_PATH, cv2.IMREAD_UNCHANGED)
 bg_original = cv2.imread(BG_PATH)
 
 if fg_rgba is None or bg_original is None:
-    raise FileNotFoundError("Foreground or background not found")
+    raise FileNotFoundError("Foreground or Background not found")
 
 bg_h, bg_w = bg_original.shape[:2]
 
@@ -54,7 +53,6 @@ fg_rgb = fg_rgba[:, :, :3]
 fg_alpha = fg_rgba[:, :, 3]
 orig_h, orig_w = fg_rgb.shape[:2]
 
-# ---------- FIT SCALE ----------
 FIT_SCALE = min(bg_w / orig_w, bg_h / orig_h)
 
 # =========================================================
@@ -66,6 +64,7 @@ class ObjectInstance:
         self.x = x
         self.y = y
         self.scale = FIT_SCALE * START_SCALE_FACTOR
+        self.filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
         self.selected = False
 
 # =========================================================
@@ -73,16 +72,11 @@ class ObjectInstance:
 # =========================================================
 
 objects = []
-selected_obj = None
-
+selected_target = "background"  # or ObjectInstance
 dragging = False
-offset_x = 0
-offset_y = 0
+offset_x = offset_y = 0
 
-# ---------- BACKGROUND STATE ----------
-bg_brightness = 0
-bg_contrast = 1.0
-bg_blur = 0
+bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
 # =========================================================
 # ================== OBJECT CREATION ======================
@@ -90,93 +84,77 @@ bg_blur = 0
 
 def create_random_object():
     scale = FIT_SCALE * START_SCALE_FACTOR
-
     fw = int(orig_w * scale)
     fh = int(orig_h * scale)
 
-    # Safe placement bounds
-    min_x = fw // 2
-    max_x = bg_w - fw // 2
-    min_y = fh // 2
-    max_y = bg_h - fh // 2
+    min_x, max_x = fw // 2, bg_w - fw // 2
+    min_y, max_y = fh // 2, bg_h - fh // 2
 
-    # Fallback: center if still impossible
     if min_x >= max_x or min_y >= max_y:
-        x = bg_w // 2
-        y = bg_h // 2
+        x, y = bg_w // 2, bg_h // 2
     else:
         x = random.randint(min_x, max_x)
         y = random.randint(min_y, max_y)
 
-    obj = ObjectInstance(x, y)
-    obj.scale = scale
-    return obj
-
+    return ObjectInstance(x, y)
 
 for _ in range(INITIAL_OBJECTS):
     objects.append(create_random_object())
 
 # =========================================================
+# ===================== FILTER UTILS ======================
+# =========================================================
+
+def apply_filters(img, f):
+    out = cv2.convertScaleAbs(img, alpha=f["contrast"], beta=f["brightness"])
+    if f["blur"] > 1:
+        out = cv2.GaussianBlur(out, (f["blur"], f["blur"]), 0)
+    return out
+
+# =========================================================
 # ===================== CALLBACKS =========================
 # =========================================================
 
+def on_brightness(val):
+    tgt = bg_filters if selected_target == "background" else selected_target.filters
+    tgt["brightness"] = val + FILTER_LIMITS["brightness"][0]
+
+def on_contrast(val):
+    tgt = bg_filters if selected_target == "background" else selected_target.filters
+    tgt["contrast"] = val / 100.0
+
+def on_blur(val):
+    tgt = bg_filters if selected_target == "background" else selected_target.filters
+    tgt["blur"] = val if val % 2 == 1 else val + 1
+
 def on_scale(val):
-    if not selected_obj:
-        return
-
-    percent = max(val, 1) / 100.0
-    scale = percent * FIT_SCALE
-    scale = max(scale, MIN_SCALE_RATIO)
-    selected_obj.scale = scale
-
-def on_bg_brightness(val):
-    global bg_brightness
-    bg_brightness = val + BG_LIMITS["brightness"][0]
-
-def on_bg_contrast(val):
-    global bg_contrast
-    bg_contrast = val / 100.0
-
-def on_bg_blur(val):
-    global bg_blur
-    bg_blur = val if val % 2 == 1 else val + 1
+    if isinstance(selected_target, ObjectInstance):
+        scale = max(val / 100.0 * FIT_SCALE, MIN_SCALE_RATIO)
+        selected_target.scale = scale
 
 # =========================================================
 # ===================== MOUSE =============================
 # =========================================================
 
 def mouse_cb(event, mx, my, flags, param):
-    global selected_obj, dragging, offset_x, offset_y
+    global selected_target, dragging, offset_x, offset_y
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        selected_obj = None
-
+        selected_target = "background"
         for obj in objects[::-1]:
             fw = int(orig_w * obj.scale)
             fh = int(orig_h * obj.scale)
-
-            x0 = obj.x - fw // 2
-            y0 = obj.y - fh // 2
-            x1 = x0 + fw
-            y1 = y0 + fh
-
-            if x0 <= mx <= x1 and y0 <= my <= y1:
-                for o in objects:
-                    o.selected = False
-
-                obj.selected = True
-                selected_obj = obj
+            if (obj.x - fw // 2 <= mx <= obj.x + fw // 2 and
+                obj.y - fh // 2 <= my <= obj.y + fh // 2):
+                selected_target = obj
                 dragging = True
                 offset_x = mx - obj.x
                 offset_y = my - obj.y
-
-                percent = int((obj.scale / FIT_SCALE) * 100)
-                cv2.setTrackbarPos("Scale %", "Editor", max(percent, 1))
                 break
 
-    elif event == cv2.EVENT_MOUSEMOVE and dragging and selected_obj:
-        selected_obj.x = mx - offset_x
-        selected_obj.y = my - offset_y
+    elif event == cv2.EVENT_MOUSEMOVE and dragging and isinstance(selected_target, ObjectInstance):
+        selected_target.x = mx - offset_x
+        selected_target.y = my - offset_y
 
     elif event == cv2.EVENT_LBUTTONUP:
         dragging = False
@@ -188,10 +166,10 @@ def mouse_cb(event, mx, my, flags, param):
 cv2.namedWindow("Editor", cv2.WINDOW_NORMAL)
 cv2.setMouseCallback("Editor", mouse_cb)
 
+cv2.createTrackbar("Brightness", "Editor", 100, 200, on_brightness)
+cv2.createTrackbar("Contrast", "Editor", 100, 300, on_contrast)
+cv2.createTrackbar("Blur", "Editor", 0, FILTER_LIMITS["blur"][1], on_blur)
 cv2.createTrackbar("Scale %", "Editor", 50, 100, on_scale)
-cv2.createTrackbar("BG Brightness", "Editor", 100, 200, on_bg_brightness)
-cv2.createTrackbar("BG Contrast", "Editor", 100, 300, on_bg_contrast)
-cv2.createTrackbar("BG Blur", "Editor", 0, BG_LIMITS["blur"][1], on_bg_blur)
 
 # =========================================================
 # ================= DATASET GENERATION ====================
@@ -199,101 +177,71 @@ cv2.createTrackbar("BG Blur", "Editor", 0, BG_LIMITS["blur"][1], on_bg_blur)
 
 def generate_dataset():
     print("🚀 Generating dataset...")
-
     for i in range(DATASET_COUNT):
-        canvas = cv2.convertScaleAbs(
-            bg_original,
-            alpha=bg_contrast,
-            beta=bg_brightness
-        )
-
-        if bg_blur > 1:
-            canvas = cv2.GaussianBlur(canvas, (bg_blur, bg_blur), 0)
+        canvas = apply_filters(bg_original, bg_filters)
 
         for obj in objects:
-            fw = int(orig_w * obj.scale)
-            fh = int(orig_h * obj.scale)
+            fw, fh = int(orig_w * obj.scale), int(orig_h * obj.scale)
+            fg_r = cv2.resize(fg_rgb, (fw, fh))
+            a_r = cv2.resize(fg_alpha, (fw, fh))
 
-            fg_r = cv2.resize(fg_rgb, (fw, fh), cv2.INTER_LANCZOS4)
-            a_r = cv2.resize(fg_alpha, (fw, fh), cv2.INTER_LINEAR)
+            fg_blended = apply_filters(fg_r, obj.filters)
 
-            b = random.randint(*FG_RANDOM["brightness"])
-            c = random.uniform(*FG_RANDOM["contrast"])
-            blur = random.randint(*FG_RANDOM["blur"])
-            blur = blur if blur % 2 == 1 else blur + 1
-
-            fg_adj = cv2.convertScaleAbs(fg_r, alpha=c, beta=b)
-            if blur > 1:
-                fg_adj = cv2.GaussianBlur(fg_adj, (blur, blur), 0)
-
-            x = int(obj.x - fw // 2)
-            y = int(obj.y - fh // 2)
-
+            x, y = int(obj.x - fw // 2), int(obj.y - fh // 2)
             roi = canvas[y:y+fh, x:x+fw]
             alpha = (a_r / 255.0)[..., None]
 
-            canvas[y:y+fh, x:x+fw] = (
-                alpha * fg_adj + (1 - alpha) * roi
-            ).astype(np.uint8)
+            canvas[y:y+fh, x:x+fw] = alpha * fg_blended + (1 - alpha) * roi
 
-        out_path = os.path.join(OUTPUT_DIR, f"img_{i:04d}.jpg")
-        cv2.imwrite(out_path, canvas)
+        # FINAL GLOBAL VARIATION (KEY IDEA)
+        global_f = {
+            "brightness": random.randint(*GLOBAL_RANDOM["brightness"]),
+            "contrast": random.uniform(*GLOBAL_RANDOM["contrast"]),
+            "blur": random.randint(*GLOBAL_RANDOM["blur"])
+        }
+        global_f["blur"] = global_f["blur"] if global_f["blur"] % 2 else global_f["blur"] + 1
 
-    print("✅ Dataset generation completed")
+        final_img = apply_filters(canvas, global_f)
+
+        path = os.path.join(OUTPUT_DIR, f"img_{i:04d}.jpg")
+        cv2.imwrite(path, final_img)
+        print(path)
+
+    print("✅ Dataset generation done")
 
 # =========================================================
 # ====================== MAIN LOOP ========================
 # =========================================================
 
 while True:
-    canvas = cv2.convertScaleAbs(
-        bg_original,
-        alpha=bg_contrast,
-        beta=bg_brightness
-    )
-
-    if bg_blur > 1:
-        canvas = cv2.GaussianBlur(canvas, (bg_blur, bg_blur), 0)
+    canvas = apply_filters(bg_original, bg_filters)
 
     for obj in objects:
-        fw = int(orig_w * obj.scale)
-        fh = int(orig_h * obj.scale)
+        fw, fh = int(orig_w * obj.scale), int(orig_h * obj.scale)
+        fg_r = cv2.resize(fg_rgb, (fw, fh))
+        a_r = cv2.resize(fg_alpha, (fw, fh))
+        fg_adj = apply_filters(fg_r, obj.filters)
 
-        obj.x = max(fw // 2, min(obj.x, bg_w - fw // 2))
-        obj.y = max(fh // 2, min(obj.y, bg_h - fh // 2))
-
-        fg_r = cv2.resize(fg_rgb, (fw, fh), cv2.INTER_LANCZOS4)
-        a_r = cv2.resize(fg_alpha, (fw, fh), cv2.INTER_LINEAR)
-
-        x = int(obj.x - fw // 2)
-        y = int(obj.y - fh // 2)
-
+        x, y = int(obj.x - fw // 2), int(obj.y - fh // 2)
         roi = canvas[y:y+fh, x:x+fw]
         alpha = (a_r / 255.0)[..., None]
 
-        canvas[y:y+fh, x:x+fw] = (
-            alpha * fg_r + (1 - alpha) * roi
-        ).astype(np.uint8)
+        canvas[y:y+fh, x:x+fw] = alpha * fg_adj + (1 - alpha) * roi
 
-        if obj.selected:
-            cv2.rectangle(
-                canvas,
-                (x, y),
-                (x + fw, y + fh),
-                (0, 255, 0),
-                2
-            )
+        if selected_target == obj:
+            cv2.rectangle(canvas, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
 
     cv2.imshow("Editor", canvas)
 
     key = cv2.waitKey(20) & 0xFF
-
     if key == 27:
         break
     elif key in (ord('n'), ord('N')):
         objects.append(create_random_object())
     elif key in (ord('d'), ord('D')):
-        objects[:] = [o for o in objects if not o.selected]
+        if isinstance(selected_target, ObjectInstance):
+            objects.remove(selected_target)
+            selected_target = "background"
     elif key in (ord('g'), ord('G')):
         generate_dataset()
 
