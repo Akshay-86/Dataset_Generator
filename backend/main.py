@@ -11,7 +11,7 @@ FG_PATH = "assets/foreground/fig_11.png"
 BG_PATH = "assets/background/background.png"
 OUTPUT_DIR = "assets/testimg"
 
-DATASET_COUNT = 5
+DATASET_COUNT = 25
 
 MIN_SCALE_RATIO = 0.001
 START_SCALE_FACTOR = 0.5
