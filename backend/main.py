@@ -8,12 +8,17 @@ import random
 # =========================================================
 
 FG_PATH = "assets/foreground/fig_11.png"
-BG_PATH = "assets/background/background.png"
+BG_PATH = "assets/background/photo0jpg.jpg"
 OUTPUT_DIR = "assets/testimg"
 
-DATASET_COUNT = 25
+DATASET_COUNT = 20
+# ---------- YOLO ----------
+YOLO_CLASS_ID = 0          # class index (0 = person, 1 = car, etc.)
+YOLO_LABEL_DIR = "assets/testimg/labels"
+os.makedirs(YOLO_LABEL_DIR, exist_ok=True)
 
-MIN_SCALE_RATIO = 0.001
+
+MIN_SCALE_RATIO = 0.01
 START_SCALE_FACTOR = 0.5
 
 FILTER_LIMITS = {
@@ -249,31 +254,74 @@ cv2.createTrackbar("Scale %", "Editor", 50, 100, on_scale)
 
 def generate_dataset():
     for i in range(DATASET_COUNT):
+        # ---------- APPLY BACKGROUND FILTERS ----------
         canvas = apply_filters(bg_original, bg_filters)
 
+        yolo_lines = []
+
+        # ---------- DRAW ALL OBJECTS ----------
         for obj in objects:
             fw = int(orig_w * obj.scale)
             fh = int(orig_h * obj.scale)
 
-            fg_r = cv2.resize(fg_rgb, (fw, fh))
-            a_r = cv2.resize(fg_alpha, (fw, fh))
+            fg_r = cv2.resize(fg_rgb, (fw, fh), cv2.INTER_LANCZOS4)
+            a_r = cv2.resize(fg_alpha, (fw, fh), cv2.INTER_LINEAR)
 
             fg_adj = apply_filters(fg_r, obj.filters)
             canvas = safe_blend(canvas, fg_adj, a_r, obj.x, obj.y)
 
+            # ---------- YOLO BBOX ----------
+            x_center = obj.x / bg_w
+            y_center = obj.y / bg_h
+            w_norm = fw / bg_w
+            h_norm = fh / bg_h
+
+            yolo_lines.append(
+                f"{YOLO_CLASS_ID} "
+                f"{x_center:.6f} "
+                f"{y_center:.6f} "
+                f"{w_norm:.6f} "
+                f"{h_norm:.6f}"
+            )
+
+        # ---------- GLOBAL FILTER RANDOMIZATION ----------
         global_f = {
             "brightness": random.randint(*GLOBAL_RANDOM["brightness"]),
             "contrast": random.uniform(*GLOBAL_RANDOM["contrast"]),
             "blur": random.randint(*GLOBAL_RANDOM["blur"])
         }
-        global_f["blur"] = global_f["blur"] if global_f["blur"] % 2 else global_f["blur"] + 1
+
+        if global_f["blur"] > 0 and global_f["blur"] % 2 == 0:
+            global_f["blur"] += 1
 
         final_img = apply_filters(canvas, global_f)
-        cv2.imwrite(os.path.join(OUTPUT_DIR, f"img_{i:04d}.jpg"), final_img)
-        print(f"img_{i:04d}.jpg")
+
+        # ---------- FILENAME ----------
+        b = global_f["brightness"]
+        c = int(global_f["contrast"] * 100)
+        bl = global_f["blur"]
+
+        img_name = (
+            f"brightness{b:+04d}_"
+            f"contrast{c:03d}_"
+            f"blur{bl:02d}_"
+            f"img{i:04d}"
+        )
+
+        img_path = os.path.join(OUTPUT_DIR, img_name + ".jpg")
+        txt_path = os.path.join(YOLO_LABEL_DIR, img_name + ".txt")
+
+        cv2.imwrite(img_path, final_img)
+
+        with open(txt_path, "w") as f:
+            f.write("\n".join(yolo_lines))
+
+        print(img_name)
+
+    print("✅ Dataset + YOLO labels generated")
 
 
-    print("✅ Dataset generated")
+
 
 # =========================================================
 # MAIN LOOP
