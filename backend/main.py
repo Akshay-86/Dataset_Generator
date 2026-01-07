@@ -19,7 +19,6 @@ FOREGROUNDS = {
         "path": "assets/Foreground/soldier.png",
         "class_id": 82
     }
-    # add more objects here
 }
 
 SAVE_DIR = "assets/Combined"
@@ -30,15 +29,7 @@ os.makedirs(JSON_DIR, exist_ok=True)
 os.makedirs(YOLO_DIR, exist_ok=True)
 
 MIN_SCALE_RATIO = 0.1
-START_SCALE_FACTOR = 0.5
-
-FILTER_LIMITS = {
-    "brightness": (-100, 100),
-    "contrast": (0.5, 2.0),
-    "blur": (0, 15)
-}
-
-INITIAL_OBJECTS = 2
+START_SCALE_FACTOR = 0.3
 
 # =========================================================
 # LOAD BACKGROUND
@@ -49,7 +40,6 @@ if bg_original is None:
     raise FileNotFoundError("Background not found")
 
 bg_h, bg_w = bg_original.shape[:2]
-
 bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
 # =========================================================
@@ -86,12 +76,11 @@ class ObjectInstance:
         self.orig_h = fg["h"]
         self.orig_w = fg["w"]
 
-        self.x = x
-        self.y = y
-
         fit = min(bg_w / self.orig_w, bg_h / self.orig_h)
         self.scale = fit * START_SCALE_FACTOR
 
+        self.x = x
+        self.y = y
         self.filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
 # =========================================================
@@ -107,6 +96,9 @@ object_names = list(FOREGROUNDS.keys())
 current_object_index = 0
 current_object_name = object_names[current_object_index]
 
+# =========================================================
+# HELPERS
+# =========================================================
 
 def cycle_object(step):
     global current_object_index, current_object_name
@@ -115,35 +107,26 @@ def cycle_object(step):
     print("🟢 Current object:", current_object_name)
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-
 def apply_filters(img, f):
     out = cv2.convertScaleAbs(img, alpha=f["contrast"], beta=f["brightness"])
     if f["blur"] > 1:
-        out = cv2.GaussianBlur(out, (f["blur"], f["blur"]), 0)
+        k = f["blur"] if f["blur"] % 2 else f["blur"] + 1
+        out = cv2.GaussianBlur(out, (k, k), 0)
     return out
 
 
 def safe_blend(canvas, fg, alpha, cx, cy):
     fh, fw = fg.shape[:2]
+    x0, y0 = int(cx - fw // 2), int(cy - fh // 2)
+    x1, y1 = x0 + fw, y0 + fh
 
-    x0 = int(cx - fw // 2)
-    y0 = int(cy - fh // 2)
-    x1 = x0 + fw
-    y1 = y0 + fh
-
-    cx0 = max(0, x0)
-    cy0 = max(0, y0)
-    cx1 = min(bg_w, x1)
-    cy1 = min(bg_h, y1)
+    cx0, cy0 = max(0, x0), max(0, y0)
+    cx1, cy1 = min(bg_w, x1), min(bg_h, y1)
 
     if cx0 >= cx1 or cy0 >= cy1:
         return canvas
 
-    fx0 = cx0 - x0
-    fy0 = cy0 - y0
+    fx0, fy0 = cx0 - x0, cy0 - y0
 
     roi = canvas[cy0:cy1, cx0:cx1]
     fg_part = fg[fy0:fy0 + (cy1 - cy0), fx0:fx0 + (cx1 - cx0)]
@@ -154,12 +137,19 @@ def safe_blend(canvas, fg, alpha, cx, cy):
 
 
 def create_random_object():
-    x = random.randint(0, bg_w)
-    y = random.randint(0, bg_h)
-    return ObjectInstance(current_object_name, x, y)
+    obj_name = current_object_name
+    fg = FG_DATA[obj_name]
 
-for _ in range(INITIAL_OBJECTS):
-    objects.append(create_random_object())
+    fit = min(bg_w / fg["w"], bg_h / fg["h"])
+    scale = fit * START_SCALE_FACTOR
+
+    fw = int(fg["w"] * scale)
+    fh = int(fg["h"] * scale)
+
+    x = random.randint(fw // 2, bg_w - fw // 2)
+    y = random.randint(fh // 2, bg_h - fh // 2)
+
+    return ObjectInstance(obj_name, x, y)
 
 # =========================================================
 # CALLBACKS
@@ -186,7 +176,10 @@ def on_scale(v):
     max_x = (2 * min(selected_target.x, bg_w - selected_target.x)) / selected_target.orig_w
     max_y = (2 * min(selected_target.y, bg_h - selected_target.y)) / selected_target.orig_h
 
-    selected_target.scale = min(req, max_x, max_y)
+    selected_target.scale = max(
+        MIN_SCALE_RATIO,
+        min(req, max_x, max_y)
+    )
 
 # =========================================================
 # MOUSE
@@ -239,15 +232,7 @@ def sync_trackbars_to_target():
 def save_combined(name):
     canvas = apply_filters(bg_original.copy(), bg_filters)
     yolo = []
-    data = {
-        "background": {
-            "width": bg_w,
-            "height": bg_h,
-            "initial_filters": bg_filters,
-            "combined_filters": bg_filters
-        },
-        "foreground": {}
-    }
+    data = {"background": {"width": bg_w, "height": bg_h}, "foreground": {}}
 
     for obj in objects:
         data["foreground"].setdefault(obj.object_name, {
@@ -260,8 +245,8 @@ def save_combined(name):
 
         fg = cv2.resize(obj.fg_rgb, (fw, fh))
         a = cv2.resize(obj.fg_alpha, (fw, fh))
-
         fg = apply_filters(fg, obj.filters)
+
         canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
 
         yolo.append(
@@ -298,7 +283,7 @@ cv2.setMouseCallback("Editor", mouse_cb)
 cv2.createTrackbar("Brightness", "Editor", 100, 200, on_brightness)
 cv2.createTrackbar("Contrast", "Editor", 100, 300, on_contrast)
 cv2.createTrackbar("Blur", "Editor", 0, 15, on_blur)
-cv2.createTrackbar("Scale %", "Editor", 50, 200, on_scale)
+cv2.createTrackbar("Scale %", "Editor", int(START_SCALE_FACTOR * 100), 200, on_scale)
 
 # =========================================================
 # MAIN LOOP
@@ -325,29 +310,29 @@ while True:
                 (0, 255, 0), 2
             )
 
+    cv2.putText(canvas, f"Current object: {current_object_name}",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+
     cv2.imshow("Editor", canvas)
 
     k = cv2.waitKey(20) & 0xFF
-
     if k == 27:
         break
-
-    elif k in (ord('['),):
+    elif k == ord('['):
         cycle_object(-1)
-
-    elif k in (ord(']'),):
+    elif k == ord(']'):
         cycle_object(1)
-
     elif k in (ord('n'), ord('N')):
         objects.append(create_random_object())
-
     elif k in (ord('d'), ord('D')):
         if isinstance(selected_target, ObjectInstance):
             objects.remove(selected_target)
             selected_target = "background"
-
     elif k in (ord('s'), ord('S')):
         save_combined("forest_1")
+    elif k in (ord('c'), ord('C')):
+        objects.clear()
+        selected_target = "background"
 
 
 cv2.destroyAllWindows()
