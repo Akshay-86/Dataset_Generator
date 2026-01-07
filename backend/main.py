@@ -2,23 +2,34 @@ import cv2
 import numpy as np
 import os
 import random
+import json
 
 # =========================================================
 # CONFIGURATION
 # =========================================================
 
-FG_PATH = "assets/foreground/fig_11.png"
-BG_PATH = "assets/background/photo0jpg.jpg"
-OUTPUT_DIR = "assets/testimg"
+BG_PATH = "assets/Background/wide-angle-shot-mountains-trees-foggy-day.jpg"
 
-DATASET_COUNT = 20
-# ---------- YOLO ----------
-YOLO_CLASS_ID = 0          # class index (0 = person, 1 = car, etc.)
-YOLO_LABEL_DIR = "assets/testimg/labels"
-os.makedirs(YOLO_LABEL_DIR, exist_ok=True)
+FOREGROUNDS = {
+    "object1": {
+        "path": "assets/Foreground/fig_11 (1).png",
+        "class_id": 81
+    },
+    "object2": {
+        "path": "assets/Foreground/soldier.png",
+        "class_id": 82
+    }
+    # add more objects here
+}
 
+SAVE_DIR = "assets/Combined"
+JSON_DIR = os.path.join(SAVE_DIR, "json")
+YOLO_DIR = os.path.join(SAVE_DIR, "yolo_label")
 
-MIN_SCALE_RATIO = 0.01
+os.makedirs(JSON_DIR, exist_ok=True)
+os.makedirs(YOLO_DIR, exist_ok=True)
+
+MIN_SCALE_RATIO = 0.1
 START_SCALE_FACTOR = 0.5
 
 FILTER_LIMITS = {
@@ -27,45 +38,61 @@ FILTER_LIMITS = {
     "blur": (0, 15)
 }
 
-GLOBAL_RANDOM = {
-    "brightness": (-40, 40),
-    "contrast": (0.8, 1.3),
-    "blur": (0, 7)
-}
-
-INITIAL_OBJECTS = 3
+INITIAL_OBJECTS = 2
 
 # =========================================================
-# LOAD
+# LOAD BACKGROUND
 # =========================================================
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-fg_rgba = cv2.imread(FG_PATH, cv2.IMREAD_UNCHANGED)
 bg_original = cv2.imread(BG_PATH)
-
-if fg_rgba is None or bg_original is None:
-    raise FileNotFoundError("Image not found")
+if bg_original is None:
+    raise FileNotFoundError("Background not found")
 
 bg_h, bg_w = bg_original.shape[:2]
 
-fg_rgb = fg_rgba[:, :, :3]
-fg_alpha = fg_rgba[:, :, 3]
-orig_h, orig_w = fg_rgb.shape[:2]
-
-FIT_SCALE = min(bg_w / orig_w, bg_h / orig_h)
+bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
 # =========================================================
-# OBJECT
+# LOAD FOREGROUNDS
+# =========================================================
+
+FG_DATA = {}
+for name, cfg in FOREGROUNDS.items():
+    rgba = cv2.imread(cfg["path"], cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.shape[2] != 4:
+        raise ValueError(f"{name} must be RGBA")
+
+    FG_DATA[name] = {
+        "rgb": rgba[:, :, :3],
+        "alpha": rgba[:, :, 3],
+        "h": rgba.shape[0],
+        "w": rgba.shape[1],
+        "class_id": cfg["class_id"]
+    }
+
+# =========================================================
+# OBJECT INSTANCE
 # =========================================================
 
 class ObjectInstance:
-    def __init__(self, x, y):
+    def __init__(self, obj_name, x, y):
+        fg = FG_DATA[obj_name]
+
+        self.object_name = obj_name
+        self.class_id = fg["class_id"]
+
+        self.fg_rgb = fg["rgb"]
+        self.fg_alpha = fg["alpha"]
+        self.orig_h = fg["h"]
+        self.orig_w = fg["w"]
+
         self.x = x
         self.y = y
-        self.scale = FIT_SCALE * START_SCALE_FACTOR
+
+        fit = min(bg_w / self.orig_w, bg_h / self.orig_h)
+        self.scale = fit * START_SCALE_FACTOR
+
         self.filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
-        self.selected = False
 
 # =========================================================
 # STATE
@@ -76,7 +103,17 @@ selected_target = "background"
 dragging = False
 offset_x = offset_y = 0
 
-bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
+object_names = list(FOREGROUNDS.keys())
+current_object_index = 0
+current_object_name = object_names[current_object_index]
+
+
+def cycle_object(step):
+    global current_object_index, current_object_name
+    current_object_index = (current_object_index + step) % len(object_names)
+    current_object_name = object_names[current_object_index]
+    print("🟢 Current object:", current_object_name)
+
 
 # =========================================================
 # HELPERS
@@ -107,32 +144,19 @@ def safe_blend(canvas, fg, alpha, cx, cy):
 
     fx0 = cx0 - x0
     fy0 = cy0 - y0
-    fx1 = fx0 + (cx1 - cx0)
-    fy1 = fy0 + (cy1 - cy0)
 
     roi = canvas[cy0:cy1, cx0:cx1]
-    fg_part = fg[fy0:fy1, fx0:fx1]
-    a_part = (alpha[fy0:fy1, fx0:fx1] / 255.0)[..., None]
+    fg_part = fg[fy0:fy0 + (cy1 - cy0), fx0:fx0 + (cx1 - cx0)]
+    a_part = (alpha[fy0:fy0 + (cy1 - cy0), fx0:fx0 + (cx1 - cx0)] / 255.0)[..., None]
 
-    canvas[cy0:cy1, cx0:cx1] = (
-        a_part * fg_part + (1 - a_part) * roi
-    ).astype(np.uint8)
-
+    canvas[cy0:cy1, cx0:cx1] = (a_part * fg_part + (1 - a_part) * roi).astype(np.uint8)
     return canvas
 
 
 def create_random_object():
-    scale = FIT_SCALE * START_SCALE_FACTOR
-    fw = int(orig_w * scale)
-    fh = int(orig_h * scale)
-
     x = random.randint(0, bg_w)
     y = random.randint(0, bg_h)
-
-    obj = ObjectInstance(x, y)
-    obj.scale = scale
-    return obj
-
+    return ObjectInstance(current_object_name, x, y)
 
 for _ in range(INITIAL_OBJECTS):
     objects.append(create_random_object())
@@ -141,31 +165,28 @@ for _ in range(INITIAL_OBJECTS):
 # CALLBACKS
 # =========================================================
 
-def on_brightness(val):
+def on_brightness(v):
     tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["brightness"] = val - 100
+    tgt["brightness"] = v - 100
 
-def on_contrast(val):
+def on_contrast(v):
     tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["contrast"] = val / 100.0
+    tgt["contrast"] = v / 100.0
 
-def on_blur(val):
+def on_blur(v):
     tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["blur"] = val if val % 2 == 1 else val + 1
+    tgt["blur"] = v if v % 2 else v + 1
 
-def on_scale(val):
+def on_scale(v):
     if not isinstance(selected_target, ObjectInstance):
         return
 
-    requested_scale = max(val / 100.0 * FIT_SCALE, MIN_SCALE_RATIO)
+    req = max(v / 100.0, MIN_SCALE_RATIO)
 
-    # Max scale allowed so object fits frame at current position
-    max_scale_x = (2 * min(selected_target.x, bg_w - selected_target.x)) / orig_w
-    max_scale_y = (2 * min(selected_target.y, bg_h - selected_target.y)) / orig_h
-    max_allowed_scale = min(max_scale_x, max_scale_y)
+    max_x = (2 * min(selected_target.x, bg_w - selected_target.x)) / selected_target.orig_w
+    max_y = (2 * min(selected_target.y, bg_h - selected_target.y)) / selected_target.orig_h
 
-    selected_target.scale = min(requested_scale, max_allowed_scale)
-
+    selected_target.scale = min(req, max_x, max_y)
 
 # =========================================================
 # MOUSE
@@ -177,8 +198,8 @@ def mouse_cb(event, mx, my, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN:
         selected_target = "background"
         for obj in objects[::-1]:
-            fw = int(orig_w * obj.scale)
-            fh = int(orig_h * obj.scale)
+            fw = int(obj.orig_w * obj.scale)
+            fh = int(obj.orig_h * obj.scale)
             if abs(mx - obj.x) <= fw // 2 and abs(my - obj.y) <= fh // 2:
                 selected_target = obj
                 dragging = True
@@ -188,53 +209,84 @@ def mouse_cb(event, mx, my, flags, param):
         sync_trackbars_to_target()
 
     elif event == cv2.EVENT_MOUSEMOVE and dragging and isinstance(selected_target, ObjectInstance):
-        fw = int(orig_w * selected_target.scale)
-        fh = int(orig_h * selected_target.scale)
+        fw = int(selected_target.orig_w * selected_target.scale)
+        fh = int(selected_target.orig_h * selected_target.scale)
 
-        new_x = mx - offset_x
-        new_y = my - offset_y
-
-        # Clamp so object never leaves frame
-        selected_target.x = max(fw // 2, min(new_x, bg_w - fw // 2))
-        selected_target.y = max(fh // 2, min(new_y, bg_h - fh // 2))
-
+        selected_target.x = max(fw // 2, min(mx - offset_x, bg_w - fw // 2))
+        selected_target.y = max(fh // 2, min(my - offset_y, bg_h - fh // 2))
 
     elif event == cv2.EVENT_LBUTTONUP:
         dragging = False
 
+# =========================================================
+# SYNC TRACKBARS
+# =========================================================
 
 def sync_trackbars_to_target():
-    if selected_target == "background":
-        cv2.setTrackbarPos(
-            "Brightness", "Editor",
-            bg_filters["brightness"] - FILTER_LIMITS["brightness"][0]
-        )
-        cv2.setTrackbarPos(
-            "Contrast", "Editor",
-            int(bg_filters["contrast"] * 100)
-        )
-        cv2.setTrackbarPos(
-            "Blur", "Editor",
-            bg_filters["blur"]
-        )
-    else:
-        cv2.setTrackbarPos(
-            "Brightness", "Editor",
-            selected_target.filters["brightness"] - FILTER_LIMITS["brightness"][0]
-        )
-        cv2.setTrackbarPos(
-            "Contrast", "Editor",
-            int(selected_target.filters["contrast"] * 100)
-        )
-        cv2.setTrackbarPos(
-            "Blur", "Editor",
-            selected_target.filters["blur"]
-        )
-        cv2.setTrackbarPos(
-            "Scale %", "Editor",
-            int((selected_target.scale / FIT_SCALE) * 100)
+    tgt = bg_filters if selected_target == "background" else selected_target.filters
+
+    cv2.setTrackbarPos("Brightness", "Editor", tgt["brightness"] + 100)
+    cv2.setTrackbarPos("Contrast", "Editor", int(tgt["contrast"] * 100))
+    cv2.setTrackbarPos("Blur", "Editor", tgt["blur"])
+
+    if isinstance(selected_target, ObjectInstance):
+        cv2.setTrackbarPos("Scale %", "Editor", int(selected_target.scale * 100))
+
+# =========================================================
+# SAVE COMBINED
+# =========================================================
+
+def save_combined(name):
+    canvas = apply_filters(bg_original.copy(), bg_filters)
+    yolo = []
+    data = {
+        "background": {
+            "width": bg_w,
+            "height": bg_h,
+            "initial_filters": bg_filters,
+            "combined_filters": bg_filters
+        },
+        "foreground": {}
+    }
+
+    for obj in objects:
+        data["foreground"].setdefault(obj.object_name, {
+            "class_id": obj.class_id,
+            "instances": []
+        })
+
+        fw = int(obj.orig_w * obj.scale)
+        fh = int(obj.orig_h * obj.scale)
+
+        fg = cv2.resize(obj.fg_rgb, (fw, fh))
+        a = cv2.resize(obj.fg_alpha, (fw, fh))
+
+        fg = apply_filters(fg, obj.filters)
+        canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
+
+        yolo.append(
+            f"{obj.class_id} "
+            f"{obj.x / bg_w:.6f} "
+            f"{obj.y / bg_h:.6f} "
+            f"{fw / bg_w:.6f} "
+            f"{fh / bg_h:.6f}"
         )
 
+        data["foreground"][obj.object_name]["instances"].append({
+            "center": [obj.x, obj.y],
+            "scale": obj.scale,
+            "filters": obj.filters
+        })
+
+    cv2.imwrite(os.path.join(SAVE_DIR, f"{name}.png"), canvas)
+
+    with open(os.path.join(JSON_DIR, f"{name}.json"), "w") as f:
+        json.dump(data, f, indent=4)
+
+    with open(os.path.join(YOLO_DIR, f"{name}.txt"), "w") as f:
+        f.write("\n".join(yolo))
+
+    print("✅ saved combined:", name)
 
 # =========================================================
 # WINDOW
@@ -245,126 +297,57 @@ cv2.setMouseCallback("Editor", mouse_cb)
 
 cv2.createTrackbar("Brightness", "Editor", 100, 200, on_brightness)
 cv2.createTrackbar("Contrast", "Editor", 100, 300, on_contrast)
-cv2.createTrackbar("Blur", "Editor", 0, FILTER_LIMITS["blur"][1], on_blur)
-cv2.createTrackbar("Scale %", "Editor", 50, 100, on_scale)
-
-# =========================================================
-# GENERATION
-# =========================================================
-
-def generate_dataset():
-    for i in range(DATASET_COUNT):
-        # ---------- APPLY BACKGROUND FILTERS ----------
-        canvas = apply_filters(bg_original, bg_filters)
-
-        yolo_lines = []
-
-        # ---------- DRAW ALL OBJECTS ----------
-        for obj in objects:
-            fw = int(orig_w * obj.scale)
-            fh = int(orig_h * obj.scale)
-
-            fg_r = cv2.resize(fg_rgb, (fw, fh), cv2.INTER_LANCZOS4)
-            a_r = cv2.resize(fg_alpha, (fw, fh), cv2.INTER_LINEAR)
-
-            fg_adj = apply_filters(fg_r, obj.filters)
-            canvas = safe_blend(canvas, fg_adj, a_r, obj.x, obj.y)
-
-            # ---------- YOLO BBOX ----------
-            x_center = obj.x / bg_w
-            y_center = obj.y / bg_h
-            w_norm = fw / bg_w
-            h_norm = fh / bg_h
-
-            yolo_lines.append(
-                f"{YOLO_CLASS_ID} "
-                f"{x_center:.6f} "
-                f"{y_center:.6f} "
-                f"{w_norm:.6f} "
-                f"{h_norm:.6f}"
-            )
-
-        # ---------- GLOBAL FILTER RANDOMIZATION ----------
-        global_f = {
-            "brightness": random.randint(*GLOBAL_RANDOM["brightness"]),
-            "contrast": random.uniform(*GLOBAL_RANDOM["contrast"]),
-            "blur": random.randint(*GLOBAL_RANDOM["blur"])
-        }
-
-        if global_f["blur"] > 0 and global_f["blur"] % 2 == 0:
-            global_f["blur"] += 1
-
-        final_img = apply_filters(canvas, global_f)
-
-        # ---------- FILENAME ----------
-        b = global_f["brightness"]
-        c = int(global_f["contrast"] * 100)
-        bl = global_f["blur"]
-
-        img_name = (
-            f"brightness{b:+04d}_"
-            f"contrast{c:03d}_"
-            f"blur{bl:02d}_"
-            f"img{i:04d}"
-        )
-
-        img_path = os.path.join(OUTPUT_DIR, img_name + ".jpg")
-        txt_path = os.path.join(YOLO_LABEL_DIR, img_name + ".txt")
-
-        cv2.imwrite(img_path, final_img)
-
-        with open(txt_path, "w") as f:
-            f.write("\n".join(yolo_lines))
-
-        print(img_name)
-
-    print("✅ Dataset + YOLO labels generated")
-
-
-
+cv2.createTrackbar("Blur", "Editor", 0, 15, on_blur)
+cv2.createTrackbar("Scale %", "Editor", 50, 200, on_scale)
 
 # =========================================================
 # MAIN LOOP
 # =========================================================
 
 while True:
-    canvas = apply_filters(bg_original, bg_filters)
+    canvas = apply_filters(bg_original.copy(), bg_filters)
 
     for obj in objects:
-        fw = int(orig_w * obj.scale)
-        fh = int(orig_h * obj.scale)
+        fw = int(obj.orig_w * obj.scale)
+        fh = int(obj.orig_h * obj.scale)
 
-        obj.x = max(fw // 2, min(obj.x, bg_w - fw // 2))
-        obj.y = max(fh // 2, min(obj.y, bg_h - fh // 2))
+        fg = cv2.resize(obj.fg_rgb, (fw, fh))
+        a = cv2.resize(obj.fg_alpha, (fw, fh))
+        fg = apply_filters(fg, obj.filters)
 
-
-        fg_r = cv2.resize(fg_rgb, (fw, fh))
-        a_r = cv2.resize(fg_alpha, (fw, fh))
-        fg_adj = apply_filters(fg_r, obj.filters)
-
-        canvas = safe_blend(canvas, fg_adj, a_r, obj.x, obj.y)
+        canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
 
         if selected_target == obj:
             cv2.rectangle(
                 canvas,
-                (int(obj.x - fw // 2), int(obj.y - fh // 2)),
-                (int(obj.x + fw // 2), int(obj.y + fh // 2)),
-                (0, 255, 0),
-                2
+                (obj.x - fw // 2, obj.y - fh // 2),
+                (obj.x + fw // 2, obj.y + fh // 2),
+                (0, 255, 0), 2
             )
 
     cv2.imshow("Editor", canvas)
 
-    key = cv2.waitKey(20) & 0xFF
-    if key == 27:
+    k = cv2.waitKey(20) & 0xFF
+
+    if k == 27:
         break
-    elif key in (ord('n'), ord('N')):
+
+    elif k in (ord('['),):
+        cycle_object(-1)
+
+    elif k in (ord(']'),):
+        cycle_object(1)
+
+    elif k in (ord('n'), ord('N')):
         objects.append(create_random_object())
-    elif key in (ord('d'), ord('D')):
+
+    elif k in (ord('d'), ord('D')):
         if isinstance(selected_target, ObjectInstance):
             objects.remove(selected_target)
             selected_target = "background"
-    elif key in (ord('g'), ord('G')):
-        generate_dataset()
+
+    elif k in (ord('s'), ord('S')):
+        save_combined("forest_1")
+
 
 cv2.destroyAllWindows()
