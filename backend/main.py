@@ -11,22 +11,18 @@ import json
 try:
     with open("backend/data.json","r") as f:
         data = json.load(f)
-except FileNotFoundError:
-    print("data.json not found.")
-except json.JSONDecodeError:
-    print("Error decoding data.json.")
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print("Failed to load data.json:", e)
+    raise SystemExit(1)
 
-BG_PATH = data["background"]["path"]
+BG_PATH = data["background"]
 
 FOREGROUNDS = {
-    "object1": {
-        "path": data["objects"]["object1"]["path"],
-        "class_id": data["objects"]["object1"]["class_id"]
-    },
-    "object2": {
-        "path": data["objects"]["object2"]["path"],
-        "class_id": data["objects"]["object2"]["class_id"]
+    name: {
+        "path": cfg["path"],
+        "class_id": cfg["class_id"]
     }
+    for name, cfg in data["objects"].items()
 }
 
 SAVE_DIR = data["save_dir"]["path"]
@@ -37,8 +33,8 @@ YOLO_DIR = os.path.join(SAVE_DIR, "yolo_label")
 os.makedirs(JSON_DIR, exist_ok=True)
 os.makedirs(YOLO_DIR, exist_ok=True)
 
-MIN_SCALE_RATIO = data["min_scale"]
 START_SCALE_FACTOR = data["starting_scale"]
+MIN_HEIGHT_PX = data["min_height_px"]   # or from data.json
 
 
 # =========================================================
@@ -156,10 +152,14 @@ def create_random_object():
     fw = int(fg["w"] * scale)
     fh = int(fg["h"] * scale)
 
-    x = random.randint(fw // 2, bg_w - fw // 2)
-    y = random.randint(fh // 2, bg_h - fh // 2)
+    if fw >= bg_w or fh >= bg_h:
+        x, y = bg_w // 2, bg_h // 2
+    else:
+        x = random.randint(fw // 2, bg_w - fw // 2)
+        y = random.randint(fh // 2, bg_h - fh // 2)
 
     return ObjectInstance(obj_name, x, y)
+
 
 # =========================================================
 # CALLBACKS
@@ -177,19 +177,23 @@ def on_blur(v):
     tgt = bg_filters if selected_target == "background" else selected_target.filters
     tgt["blur"] = v if v % 2 else v + 1
 
-def on_scale(v):
+def on_height_change(val):
     if not isinstance(selected_target, ObjectInstance):
         return
 
-    req = max(v / 100.0, MIN_SCALE_RATIO)
+    # clamp
+    height_px = max(val, MIN_HEIGHT_PX)
 
+    # convert height → scale
+    scale = height_px / selected_target.orig_h
+
+    # max allowed scale (stay in frame)
     max_x = (2 * min(selected_target.x, bg_w - selected_target.x)) / selected_target.orig_w
     max_y = (2 * min(selected_target.y, bg_h - selected_target.y)) / selected_target.orig_h
 
-    selected_target.scale = max(
-        MIN_SCALE_RATIO,
-        min(req, max_x, max_y)
-    )
+    selected_target.scale = min(scale, max_x, max_y)
+
+
 
 # =========================================================
 # MOUSE
@@ -233,7 +237,9 @@ def sync_trackbars_to_target():
     cv2.setTrackbarPos("Blur", "Editor", tgt["blur"])
 
     if isinstance(selected_target, ObjectInstance):
-        cv2.setTrackbarPos("Scale %", "Editor", int(selected_target.scale * 100))
+        height_px = int(selected_target.orig_h * selected_target.scale)
+        cv2.setTrackbarPos("Height px", "Editor", height_px)
+
 
 # =========================================================
 # SAVE COMBINED
@@ -283,6 +289,53 @@ def save_combined(name):
 
     print("✅ saved combined:", name)
 
+
+#----------------------------------------------------------
+#multilinewrite progran
+def putText_multiline(
+    img,
+    text,
+    org,
+    font=cv2.FONT_HERSHEY_SIMPLEX,
+    font_scale=0.6,
+    color=(255, 255, 255),
+    thickness=1,
+    line_type=cv2.LINE_AA,
+    line_spacing=1.4
+):
+    """
+    Draw multi-line text using cv2.putText()
+
+    Parameters:
+    - img: image
+    - text: string with '\n'
+    - org: (x, y) starting point (top-left of first line)
+    - font, font_scale, color, thickness, line_type: same as cv2.putText
+    - line_spacing: multiplier for line height
+    """
+
+    x, y = org
+    lines = text.split('\n')
+
+    # Get height of one line
+    (w, h), baseline = cv2.getTextSize(
+        "A", font, font_scale, thickness
+    )
+    line_height = int(h * line_spacing)
+
+    for i, line in enumerate(lines):
+        y_i = y + i * line_height
+        cv2.putText(
+            img,
+            line,
+            (x, y_i),
+            font,
+            font_scale,
+            color,
+            thickness,
+            line_type
+        )
+
 # =========================================================
 # WINDOW
 # =========================================================
@@ -293,7 +346,7 @@ cv2.setMouseCallback("Editor", mouse_cb)
 cv2.createTrackbar("Brightness", "Editor", 100, 200, on_brightness)
 cv2.createTrackbar("Contrast", "Editor", 100, 300, on_contrast)
 cv2.createTrackbar("Blur", "Editor", 0, 15, on_blur)
-cv2.createTrackbar("Scale %", "Editor", int(START_SCALE_FACTOR * 100), 200, on_scale)
+cv2.createTrackbar("Height px", "Editor", 100, 2000, on_height_change)
 
 # =========================================================
 # MAIN LOOP
@@ -319,9 +372,15 @@ while True:
                 (obj.x + fw // 2, obj.y + fh // 2),
                 (0, 255, 0), 2
             )
-
+            
+    if isinstance(selected_target, ObjectInstance):
+        fh = int(selected_target.orig_h * selected_target.scale)
+        cv2.putText(canvas, f"Height: {fh}px", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     cv2.putText(canvas, f"Current object: {current_object_name}",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    txt="Depth  Height(px)\n 10      177\n 15      118\n 20      89\n 25      75\n 30      66\n 35      56\n 40      47\n 45      44\n 50      42\n 55      36\n 60      35\n 65      33\n 70      29"
+    putText_multiline(canvas,txt,(bg_w - 250,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    
 
     cv2.imshow("Editor", canvas)
 

@@ -61,8 +61,8 @@ def remove_bg_and_autocrop(
 # Example usage
 # -------------------------------
 if __name__ == "__main__":
-    input_image_path = "assets/normalforeground/soldier1.avif"
-    output_image_path = "assets/foreground/soldier1.png"
+    input_image_path = "assets/normalforeground/soldier.jpg"
+    output_image_path = "assets/Foreground/soldier.png"
 
     remove_bg_and_autocrop(
         input_path=input_image_path,
