@@ -4,14 +4,23 @@ import os
 import random
 import shutil
 
-BASE_DIR = "assets/Combined"
-OUT_DIR = "assets/output"
-COUNT = 10
+
+try:
+    with open("backend/data.json","r") as f:
+        data = json.load(f)
+except FileNotFoundError:
+    print("data.json not found.")
+except json.JSONDecodeError:
+    print("Error decoding data.json.")
+
+BASE_DIR = data["base_dir"]
+OUT_DIR = data["out_dir"]
+COUNT = data["count"]
 
 GLOBAL_RANDOM = {
-    "brightness": (-50, 50),
-    "contrast": (0.8, 1.3),
-    "blur": (0, 7)
+    "brightness": tuple(data["global_random"]["brightness"]),
+    "contrast": tuple(data["global_random"]["contrast"]),
+    "blur": tuple(data["global_random"]["blur"])
 }
 
 def apply_filters(img, f):

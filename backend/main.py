@@ -8,28 +8,38 @@ import json
 # CONFIGURATION
 # =========================================================
 
-BG_PATH = "assets/Background/wide-angle-shot-mountains-trees-foggy-day.jpg"
+try:
+    with open("backend/data.json","r") as f:
+        data = json.load(f)
+except FileNotFoundError:
+    print("data.json not found.")
+except json.JSONDecodeError:
+    print("Error decoding data.json.")
+
+BG_PATH = data["background"]["path"]
 
 FOREGROUNDS = {
     "object1": {
-        "path": "assets/Foreground/fig_11 (1).png",
-        "class_id": 81
+        "path": data["objects"]["object1"]["path"],
+        "class_id": data["objects"]["object1"]["class_id"]
     },
     "object2": {
-        "path": "assets/Foreground/soldier.png",
-        "class_id": 82
+        "path": data["objects"]["object2"]["path"],
+        "class_id": data["objects"]["object2"]["class_id"]
     }
 }
 
-SAVE_DIR = "assets/Combined"
+SAVE_DIR = data["save_dir"]["path"]
+
 JSON_DIR = os.path.join(SAVE_DIR, "json")
 YOLO_DIR = os.path.join(SAVE_DIR, "yolo_label")
 
 os.makedirs(JSON_DIR, exist_ok=True)
 os.makedirs(YOLO_DIR, exist_ok=True)
 
-MIN_SCALE_RATIO = 0.1
-START_SCALE_FACTOR = 0.3
+MIN_SCALE_RATIO = data["min_scale"]
+START_SCALE_FACTOR = data["starting_scale"]
+
 
 # =========================================================
 # LOAD BACKGROUND
@@ -311,7 +321,7 @@ while True:
             )
 
     cv2.putText(canvas, f"Current object: {current_object_name}",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
     cv2.imshow("Editor", canvas)
 
@@ -329,7 +339,7 @@ while True:
             objects.remove(selected_target)
             selected_target = "background"
     elif k in (ord('s'), ord('S')):
-        save_combined("forest_1")
+        save_combined(data["save_filename"])
     elif k in (ord('c'), ord('C')):
         objects.clear()
         selected_target = "background"

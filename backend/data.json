@@ -1,0 +1,30 @@
+{
+    "background":{
+        "path":"assets/Background/gettyimages-1634336092-2048x2048.jpg"
+    },
+    "objects":{
+        "object1":{
+            "path":"assets/Foreground/fig_11 (1).png",
+            "class_id": 81
+        },
+        "object2":{
+            "path":"assets/Foreground/soldier.png",
+            "class_id": 82
+        }
+    },
+    "save_dir":{
+        "path":"assets/Combined"
+    },
+    "min_scale":0.1,
+    "starting_scale":1.0,
+    "save_filename":"combined_image1",
+    "base_dir":"assets/Combined",
+    "out_dir":"assets/output",
+    "count":10,
+    "global_random": {
+        "brightness": [-50, 50],
+        "contrast": [0.8, 1.3],
+        "blur": [0, 7]
+    }
+
+}
