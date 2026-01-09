@@ -2,7 +2,7 @@
     "background":"assets/Background/global/background.png",
     "objects":{
         "Soldier_boy":{
-            "path":"assets/Foreground/fig_11 (1).png",
+            "path":"assets/Foreground/fig_11 (2).png",
             "class_id": 81
         },
         "Soldier_girl":{
@@ -14,11 +14,11 @@
         "path":"assets/Combined"
     },
     "starting_scale":0.5,
-    "min_height_px":50,
-    "save_filename":"combined_image1",
+    "min_height_px":20,
+    "save_filename":"combined_image4",
     "base_dir":"assets/Combined",
     "out_dir":"assets/output",
-    "count":10,
+    "count":55,
     "global_random": {
         "brightness": [-50, 50],
         "contrast": [0.8, 1.3],

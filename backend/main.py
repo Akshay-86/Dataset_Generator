@@ -15,11 +15,42 @@ except (FileNotFoundError, json.JSONDecodeError) as e:
     print("Failed to load data.json:", e)
     raise SystemExit(1)
 
-BG_PATH = data["background"]
+# BG_PATH = data["background"]
+
+# =========================================================
+# BACKGROUND SWITCH PLUGIN
+# =========================================================
+
+BACKGROUND_LIST = [
+        "assets/Background/desert/CbivdLKKTLVsjak9RDT9J5-1920-80.jpg",
+        "assets/Background/desert/Desert-U.S.webp",
+        "assets/Background/desert/libia-sahara-desert-ubari.jpg",
+        "assets/Background/forest/india-forest.webp",
+        "assets/Background/forest/photo-1542202229-7d93c33f5d07.avif",
+        "assets/Background/forest/photo-1441974231531-c6227db76b6e.avif",
+        "assets/Background/forest/photo-1508088268825-90a536e9364a.avif",
+        "assets/Background/forest/photo0jpg.jpg",
+        "assets/Background/forest/Picture-2.jpg",
+        "assets/Background/forest/premium_photo-1683444545165-877d0ab2b861.jpeg",
+        "assets/Background/forest/shutterstock_601970732.webp",
+        "assets/Background/global/background.png",
+        "assets/Background/global/clear_road.jpeg",
+        "assets/Background/hills/free-photo-of-green-plains-and-hills.jpeg",
+        "assets/Background/hills/free-photo-of-landscape-of-hills-and-field.jpeg",
+        "assets/Background/plains/gettyimages-1634336092-2048x2048.jpg",
+        "assets/Background/plains/istockphoto-905757300-2048x2048.webp",
+        "assets/Background/plains/istockphoto-1199401513-612x612.jpg",
+        "assets/Background/plains/photo-1618101554052-5b079e68a4bd.jpeg",
+        "assets/Background/plains/wide-angle-shot-mountains-trees-foggy-day.jpg"
+]
+
+bg_index = 0
+is_syncing_ui = False
+
 
 FOREGROUNDS = {
     name: {
-        "path": cfg["path"],
+        "path": cfg["path"],    
         "class_id": cfg["class_id"]
     }
     for name, cfg in data["objects"].items()
@@ -41,12 +72,65 @@ MIN_HEIGHT_PX = data["min_height_px"]   # or from data.json
 # LOAD BACKGROUND
 # =========================================================
 
-bg_original = cv2.imread(BG_PATH)
+
+# bg_original = cv2.imread(BACKGROUND_LIST)
+# if bg_original is None:
+#     raise FileNotFoundError("Background not found")
+
+# bg_h, bg_w = bg_original.shape[:2]
+
+bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
+
+
+def load_background(path):
+    img = cv2.imread(path)
+    if img is None:
+        print("⚠️ Failed to load background:", path)
+        return None
+    return img
+
+
+def cycle_background(step):
+    global bg_index, bg_original, bg_h, bg_w
+
+    bg_index = (bg_index + step) % len(BACKGROUND_LIST)
+    new_bg = load_background(BACKGROUND_LIST[bg_index])
+
+    if new_bg is None:
+        return
+
+    bg_original = new_bg
+    bg_h, bg_w = bg_original.shape[:2]
+
+    # 🔧 Re-fit existing objects
+    for obj in objects:
+        fit = min(bg_w / obj.orig_w, bg_h / obj.orig_h)
+        obj.scale = min(obj.scale, fit)
+
+        fw = int(obj.orig_w * obj.scale)
+        fh = int(obj.orig_h * obj.scale)
+
+        obj.x = max(fw // 2, min(obj.x, bg_w - fw // 2))
+        obj.y = max(fh // 2, min(obj.y, bg_h - fh // 2))
+
+    sync_trackbars_to_target()
+    cv2.setTrackbarMax("Height px", "Editor", bg_h)
+
+    print("🖼️ Background:", BACKGROUND_LIST[bg_index])
+
+
+
+# =========================================================
+# INITIAL BACKGROUND LOAD (REQUIRED)
+# =========================================================
+
+bg_original = load_background(BACKGROUND_LIST[bg_index])
 if bg_original is None:
-    raise FileNotFoundError("Background not found")
+    raise SystemExit("Failed to load initial background")
 
 bg_h, bg_w = bg_original.shape[:2]
-bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
+
+MAX_HEIGHT_PX = bg_h
 
 # =========================================================
 # LOAD FOREGROUNDS
@@ -101,6 +185,9 @@ offset_x = offset_y = 0
 object_names = list(FOREGROUNDS.keys())
 current_object_index = 0
 current_object_name = object_names[current_object_index]
+selected_objects = set()   # multi-selection set
+drag_offsets = {}  # per-object offset during multi-drag
+
 
 # =========================================================
 # HELPERS
@@ -166,32 +253,48 @@ def create_random_object():
 # =========================================================
 
 def on_brightness(v):
-    tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["brightness"] = v - 100
+    if selected_objects:
+        for obj in selected_objects:
+            obj.filters["brightness"] = v - 100
+    else:
+        bg_filters["brightness"] = v - 100
+
 
 def on_contrast(v):
-    tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["contrast"] = v / 100.0
+    if selected_objects:
+        for obj in selected_objects:
+            obj.filters["contrast"] = v / 100.0
+    else:
+        bg_filters["contrast"] = v / 100.0
 
 def on_blur(v):
-    tgt = bg_filters if selected_target == "background" else selected_target.filters
-    tgt["blur"] = v if v % 2 else v + 1
+    v = v if v % 2 else v + 1
+    if selected_objects:
+        for obj in selected_objects:
+            obj.filters["blur"] = v
+    else:
+        bg_filters["blur"] = v
+
 
 def on_height_change(val):
-    if not isinstance(selected_target, ObjectInstance):
+    global is_syncing_ui
+
+    if is_syncing_ui:
         return
 
-    # clamp
-    height_px = max(val, MIN_HEIGHT_PX)
+    if not selected_objects:
+        return
 
-    # convert height → scale
-    scale = height_px / selected_target.orig_h
+    for obj in selected_objects:
+        height_px = max(val, MIN_HEIGHT_PX)
+        scale = height_px / obj.orig_h
 
-    # max allowed scale (stay in frame)
-    max_x = (2 * min(selected_target.x, bg_w - selected_target.x)) / selected_target.orig_w
-    max_y = (2 * min(selected_target.y, bg_h - selected_target.y)) / selected_target.orig_h
+        max_x = (2 * min(obj.x, bg_w - obj.x)) / obj.orig_w
+        max_y = (2 * min(obj.y, bg_h - obj.y)) / obj.orig_h
 
-    selected_target.scale = min(scale, max_x, max_y)
+        obj.scale = min(scale, max_x, max_y)
+
+
 
 
 
@@ -200,36 +303,72 @@ def on_height_change(val):
 # =========================================================
 
 def mouse_cb(event, mx, my, flags, param):
-    global selected_target, dragging, offset_x, offset_y
+    global selected_target, dragging, drag_offsets, selected_objects
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        selected_target = "background"
+        dragging = False
+        drag_offsets.clear()
+
+        clicked_obj = None
         for obj in objects[::-1]:
             fw = int(obj.orig_w * obj.scale)
             fh = int(obj.orig_h * obj.scale)
             if abs(mx - obj.x) <= fw // 2 and abs(my - obj.y) <= fh // 2:
-                selected_target = obj
-                dragging = True
-                offset_x = mx - obj.x
-                offset_y = my - obj.y
+                clicked_obj = obj
                 break
+
+        if flags & cv2.EVENT_FLAG_SHIFTKEY:
+            if clicked_obj:
+                if clicked_obj in selected_objects:
+                    selected_objects.remove(clicked_obj)
+                else:
+                    selected_objects.add(clicked_obj)
+                selected_target = clicked_obj
+        else:
+            selected_objects.clear()
+            if clicked_obj:
+                selected_objects.add(clicked_obj)
+                selected_target = clicked_obj
+            else:
+                selected_target = "background"
+
+        if clicked_obj and clicked_obj in selected_objects:
+            dragging = True
+            base_dx = mx - clicked_obj.x
+            base_dy = my - clicked_obj.y
+
+            for obj in selected_objects:
+                drag_offsets[obj] = (
+                    base_dx + (clicked_obj.x - obj.x),
+                    base_dy + (clicked_obj.y - obj.y)
+                )
+
         sync_trackbars_to_target()
 
-    elif event == cv2.EVENT_MOUSEMOVE and dragging and isinstance(selected_target, ObjectInstance):
-        fw = int(selected_target.orig_w * selected_target.scale)
-        fh = int(selected_target.orig_h * selected_target.scale)
+    elif event == cv2.EVENT_MOUSEMOVE and dragging and selected_objects:
+        for obj in selected_objects:
+            dx, dy = drag_offsets[obj]
+            fw = int(obj.orig_w * obj.scale)
+            fh = int(obj.orig_h * obj.scale)
 
-        selected_target.x = max(fw // 2, min(mx - offset_x, bg_w - fw // 2))
-        selected_target.y = max(fh // 2, min(my - offset_y, bg_h - fh // 2))
+            obj.x = max(fw // 2, min(mx - dx, bg_w - fw // 2))
+            obj.y = max(fh // 2, min(my - dy, bg_h - fh // 2))
 
     elif event == cv2.EVENT_LBUTTONUP:
         dragging = False
+        drag_offsets.clear()
+
+
+
 
 # =========================================================
 # SYNC TRACKBARS
 # =========================================================
 
 def sync_trackbars_to_target():
+    global is_syncing_ui
+    is_syncing_ui = True
+
     tgt = bg_filters if selected_target == "background" else selected_target.filters
 
     cv2.setTrackbarPos("Brightness", "Editor", tgt["brightness"] + 100)
@@ -239,6 +378,9 @@ def sync_trackbars_to_target():
     if isinstance(selected_target, ObjectInstance):
         height_px = int(selected_target.orig_h * selected_target.scale)
         cv2.setTrackbarPos("Height px", "Editor", height_px)
+
+    is_syncing_ui = False
+
 
 
 # =========================================================
@@ -292,27 +434,7 @@ def save_combined(name):
 
 #----------------------------------------------------------
 #multilinewrite progran
-def putText_multiline(
-    img,
-    text,
-    org,
-    font=cv2.FONT_HERSHEY_SIMPLEX,
-    font_scale=0.6,
-    color=(255, 255, 255),
-    thickness=1,
-    line_type=cv2.LINE_AA,
-    line_spacing=1.4
-):
-    """
-    Draw multi-line text using cv2.putText()
-
-    Parameters:
-    - img: image
-    - text: string with '\n'
-    - org: (x, y) starting point (top-left of first line)
-    - font, font_scale, color, thickness, line_type: same as cv2.putText
-    - line_spacing: multiplier for line height
-    """
+def putText_multiline(img, text, org, font=cv2.FONT_HERSHEY_SIMPLEX, font_scale=0.6, color=(255, 255, 255), thickness=1, line_type=cv2.LINE_AA, line_spacing=1.4):
 
     x, y = org
     lines = text.split('\n')
@@ -325,16 +447,17 @@ def putText_multiline(
 
     for i, line in enumerate(lines):
         y_i = y + i * line_height
-        cv2.putText(
-            img,
-            line,
-            (x, y_i),
-            font,
-            font_scale,
-            color,
-            thickness,
-            line_type
-        )
+        cv2.putText(img, line, (x, y_i), font, font_scale, color, thickness, line_type)
+
+#--------------------------
+def get_next_filename(base="scene"):
+    i = 1
+    while True:
+        name = f"{base}_{i:03d}"
+        if not os.path.exists(os.path.join(SAVE_DIR, name + ".png")):
+            return name
+        i += 1
+
 
 # =========================================================
 # WINDOW
@@ -365,13 +488,16 @@ while True:
 
         canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
 
-        if selected_target == obj:
+        if obj in selected_objects:
+            color = (0, 255, 0) if obj == selected_target else (255, 0, 0)
             cv2.rectangle(
                 canvas,
                 (obj.x - fw // 2, obj.y - fh // 2),
                 (obj.x + fw // 2, obj.y + fh // 2),
-                (0, 255, 0), 2
+                color, 2
             )
+
+
             
     if isinstance(selected_target, ObjectInstance):
         fh = int(selected_target.orig_h * selected_target.scale)
@@ -398,10 +524,20 @@ while True:
             objects.remove(selected_target)
             selected_target = "background"
     elif k in (ord('s'), ord('S')):
-        save_combined(data["save_filename"])
+        name = get_next_filename()
+        save_combined(name)
     elif k in (ord('c'), ord('C')):
         objects.clear()
+        selected_objects.clear()
         selected_target = "background"
+        sync_trackbars_to_target()
+
+    elif k == ord(','):   # previous background
+        cycle_background(-1)
+
+    elif k == ord('.'):   # next background
+        cycle_background(1)
+
 
 
 cv2.destroyAllWindows()
