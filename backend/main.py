@@ -81,6 +81,23 @@ MIN_HEIGHT_PX = data["min_height_px"]   # or from data.json
 
 bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
+# Performance optimization: declare cache variables early
+object_render_cache = {}
+needs_redraw = True
+
+
+def mark_dirty():
+    """Mark that the canvas needs to be redrawn
+    
+    Note: We clear the entire object_render_cache for simplicity and correctness.
+    While selective invalidation could be more efficient, full clearing ensures
+    no stale cached renders are used and the performance impact is negligible
+    (just clearing a dict), while rendering benefits from cache hits remain high.
+    """
+    global needs_redraw, object_render_cache
+    needs_redraw = True
+    object_render_cache.clear()
+
 
 def load_background(path):
     img = cv2.imread(path)
@@ -191,26 +208,11 @@ drag_offsets = {}  # per-object offset during multi-drag
 
 # Performance optimization: cache system
 cached_canvas = bg_original.copy()  # Initialize with background
-needs_redraw = True
-object_render_cache = {}  # Cache for rendered objects
 
 
 # =========================================================
 # HELPERS
 # =========================================================
-
-def mark_dirty():
-    """Mark that the canvas needs to be redrawn
-    
-    Note: We clear the entire object_render_cache for simplicity and correctness.
-    While selective invalidation could be more efficient, full clearing ensures
-    no stale cached renders are used and the performance impact is negligible
-    (just clearing a dict), while rendering benefits from cache hits remain high.
-    """
-    global needs_redraw, object_render_cache
-    needs_redraw = True
-    object_render_cache.clear()
-
 
 def cycle_object(step):
     global current_object_index, current_object_name
