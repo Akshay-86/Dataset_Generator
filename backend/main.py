@@ -133,10 +133,6 @@ bg_h, bg_w = bg_original.shape[:2]
 
 MAX_HEIGHT_PX = bg_h
 
-# Initialize cached canvas
-cached_canvas = bg_original.copy()
-needs_redraw = True
-
 # =========================================================
 # LOAD FOREGROUNDS
 # =========================================================
@@ -194,7 +190,7 @@ selected_objects = set()   # multi-selection set
 drag_offsets = {}  # per-object offset during multi-drag
 
 # Performance optimization: cache system
-cached_canvas = None
+cached_canvas = bg_original.copy()  # Initialize with background
 needs_redraw = True
 object_render_cache = {}  # Cache for rendered objects
 
@@ -204,7 +200,13 @@ object_render_cache = {}  # Cache for rendered objects
 # =========================================================
 
 def mark_dirty():
-    """Mark that the canvas needs to be redrawn"""
+    """Mark that the canvas needs to be redrawn
+    
+    Note: We clear the entire object_render_cache for simplicity and correctness.
+    While selective invalidation could be more efficient, full clearing ensures
+    no stale cached renders are used and the performance impact is negligible
+    (just clearing a dict), while rendering benefits from cache hits remain high.
+    """
     global needs_redraw, object_render_cache
     needs_redraw = True
     object_render_cache.clear()
@@ -247,7 +249,12 @@ def safe_blend(canvas, fg, alpha, cx, cy):
 
 
 def get_cached_object_render(obj):
-    """Get or create a cached rendered version of an object"""
+    """Get or create a cached rendered version of an object
+    
+    Note: Cache key includes id(obj) to ensure each object instance has its own cache entry.
+    This is intentional as different objects shouldn't share cached renders even if they have
+    identical properties, since the underlying image data (fg_rgb, fg_alpha) is different.
+    """
     # Create a cache key based on object properties
     cache_key = (
         id(obj),

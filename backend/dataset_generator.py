@@ -35,7 +35,12 @@ def apply_filters(img, f):
 
 
 def load_cached_image(path):
-    """Load image with caching to avoid repeated disk I/O"""
+    """Load image with caching to avoid repeated disk I/O
+    
+    Returns a copy of the cached image to prevent accidental modification of cached data.
+    The copy overhead is negligible compared to disk I/O savings, and ensures correctness
+    as callers may apply filters or other modifications to the returned image.
+    """
     if path not in _image_cache:
         img = cv2.imread(path)
         if img is None:
