@@ -85,7 +85,7 @@ bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 def load_background(path):
     img = cv2.imread(path)
     if img is None:
-        print("⚠️ Failed to load background:", path)
+        print("Failed to load background:", path)
         return None
     return img
 
@@ -116,7 +116,7 @@ def cycle_background(step):
     sync_trackbars_to_target()
     cv2.setTrackbarMax("Height px", "Editor", bg_h)
 
-    print("🖼️ Background:", BACKGROUND_LIST[bg_index])
+    print("Background:", BACKGROUND_LIST[bg_index])
 
 
 
@@ -171,6 +171,7 @@ class ObjectInstance:
 
         self.x = x
         self.y = y
+        self.rotation = 0.0  # degrees
         self.filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
 # =========================================================
@@ -247,6 +248,32 @@ def create_random_object():
 
     return ObjectInstance(obj_name, x, y)
 
+def rotate_image_keep_alpha(img, alpha, angle_deg):
+    """
+    Rotate RGBA components around center, keeping size.
+    """
+    h, w = img.shape[:2]
+    center = (w // 2, h // 2)
+
+    M = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+
+    rotated_img = cv2.warpAffine(
+        img, M, (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0)
+    )
+
+    rotated_alpha = cv2.warpAffine(
+        alpha, M, (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+
+    return rotated_img, rotated_alpha
+
+
 
 # =========================================================
 # CALLBACKS
@@ -293,6 +320,18 @@ def on_height_change(val):
         max_y = (2 * min(obj.y, bg_h - obj.y)) / obj.orig_h
 
         obj.scale = min(scale, max_x, max_y)
+
+def on_rotation_change(val):
+    global is_syncing_ui
+
+    if is_syncing_ui:
+        return
+
+    angle = val - 180  # map to [-180, +180]
+
+    if isinstance(selected_target, ObjectInstance):
+        selected_target.rotation = angle
+
 
 
 
@@ -379,7 +418,15 @@ def sync_trackbars_to_target():
         height_px = int(selected_target.orig_h * selected_target.scale)
         cv2.setTrackbarPos("Height px", "Editor", height_px)
 
+        # 🔄 ROTATION SYNC
+        cv2.setTrackbarPos(
+            "Rotation",
+            "Editor",
+            int(selected_target.rotation + 180)
+        )
+
     is_syncing_ui = False
+
 
 
 
@@ -390,7 +437,7 @@ def sync_trackbars_to_target():
 def save_combined(name):
     canvas = apply_filters(bg_original.copy(), bg_filters)
     yolo = []
-    data = {"background": {"width": bg_w, "height": bg_h}, "foreground": {}}
+    data = {"background": {"width": bg_w, "height": bg_h, "filters": bg_filters}, "foreground": {}}
 
     for obj in objects:
         data["foreground"].setdefault(obj.object_name, {
@@ -418,22 +465,31 @@ def save_combined(name):
         data["foreground"][obj.object_name]["instances"].append({
             "center": [obj.x, obj.y],
             "scale": obj.scale,
-            "filters": obj.filters
+            "rotation": obj.rotation,
+            "filters": {
+                "brightness": obj.filters["brightness"],
+                "contrast": obj.filters["contrast"],
+                "blur": obj.filters["blur"]
+            },
+            "size_px": {
+                "width": fw,
+                "height": fh
+            }
         })
 
     cv2.imwrite(os.path.join(SAVE_DIR, f"{name}.png"), canvas)
 
     with open(os.path.join(JSON_DIR, f"{name}.json"), "w") as f:
-        json.dump(data, f, indent=4)
+        json.dump(data, f, indent=2)
 
     with open(os.path.join(YOLO_DIR, f"{name}.txt"), "w") as f:
         f.write("\n".join(yolo))
 
-    print("✅ saved combined:", name)
+    print("saved combined:", name)
 
 
 #----------------------------------------------------------
-#multilinewrite progran
+#  Multilinewrite program
 def putText_multiline(img, text, org, font=cv2.FONT_HERSHEY_SIMPLEX, font_scale=0.6, color=(255, 255, 255), thickness=1, line_type=cv2.LINE_AA, line_spacing=1.4):
 
     x, y = org
@@ -470,6 +526,13 @@ cv2.createTrackbar("Brightness", "Editor", 100, 200, on_brightness)
 cv2.createTrackbar("Contrast", "Editor", 100, 300, on_contrast)
 cv2.createTrackbar("Blur", "Editor", 0, 15, on_blur)
 cv2.createTrackbar("Height px", "Editor", 100, 2000, on_height_change)
+cv2.createTrackbar(
+    "Rotation",
+    "Editor",
+    180,     # center = 0°
+    360,     # [-180 … +180]
+    on_rotation_change
+)
 
 # =========================================================
 # MAIN LOOP
@@ -483,8 +546,11 @@ while True:
         fh = int(obj.orig_h * obj.scale)
 
         fg = cv2.resize(obj.fg_rgb, (fw, fh))
-        a = cv2.resize(obj.fg_alpha, (fw, fh))
+        a  = cv2.resize(obj.fg_alpha, (fw, fh))
         fg = apply_filters(fg, obj.filters)
+        if obj.rotation != 0:
+            fg, a = rotate_image_keep_alpha(fg, a, obj.rotation)
+
 
         canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
 
@@ -525,7 +591,7 @@ while True:
             selected_target = "background"
     elif k in (ord('s'), ord('S')):
         name = get_next_filename()
-        save_combined(name)
+        save_combined("text")
     elif k in (ord('c'), ord('C')):
         objects.clear()
         selected_objects.clear()
