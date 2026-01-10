@@ -23,6 +23,9 @@ GLOBAL_RANDOM = {
     "blur": tuple(data["global_random"]["blur"])
 }
 
+# Performance optimization: cache for loaded images
+_image_cache = {}
+
 def apply_filters(img, f):
     out = cv2.convertScaleAbs(img, alpha=f["contrast"], beta=f["brightness"])
     if f["blur"] > 1:
@@ -30,8 +33,29 @@ def apply_filters(img, f):
         out = cv2.GaussianBlur(out, (k, k), 0)
     return out
 
+
+def load_cached_image(path):
+    """Load image with caching to avoid repeated disk I/O
+    
+    Returns a copy of the cached image to prevent accidental modification of cached data.
+    The copy overhead is negligible compared to disk I/O savings, and ensures correctness
+    as callers may apply filters or other modifications to the returned image.
+    
+    Note: This cache has no size limit. For the typical use case (batch processing a
+    fixed set of scene images), this is acceptable. For long-running processes with
+    many unique images, consider implementing an LRU cache with size limits to prevent
+    unbounded memory growth.
+    """
+    if path not in _image_cache:
+        img = cv2.imread(path)
+        if img is None:
+            raise FileNotFoundError(f"Image not found: {path}")
+        _image_cache[path] = img
+    return _image_cache[path].copy()  # Return a copy to avoid modifying cached version
+
+
 def process(scene):
-    img = cv2.imread(f"{BASE_DIR}/{scene}.png")
+    img = load_cached_image(f"{BASE_DIR}/{scene}.png")
 
     with open(f"{BASE_DIR}/json/{scene}.json") as f:
         meta = json.load(f)

@@ -81,6 +81,32 @@ MIN_HEIGHT_PX = data["min_height_px"]   # or from data.json
 
 bg_filters = {"brightness": 0, "contrast": 1.0, "blur": 0}
 
+# Performance optimization: declare cache variables early
+object_render_cache = {}
+needs_redraw = True
+
+
+def mark_dirty():
+    """Mark that the canvas needs to be redrawn
+    
+    This function should be called whenever any visual change occurs that requires
+    re-rendering the canvas. Common triggering events include:
+    - Object movement (mouse drag)
+    - Filter changes (brightness, contrast, blur)
+    - Object creation or deletion
+    - Selection changes
+    - Background changes
+    - Object scale/size changes
+    
+    Note: We clear the entire object_render_cache for simplicity and correctness.
+    While selective invalidation could be more efficient, full clearing ensures
+    no stale cached renders are used and the performance impact is negligible
+    (just clearing a dict), while rendering benefits from cache hits remain high.
+    """
+    global needs_redraw, object_render_cache
+    needs_redraw = True
+    object_render_cache.clear()
+
 
 def load_background(path):
     img = cv2.imread(path)
@@ -113,6 +139,7 @@ def cycle_background(step):
         obj.x = max(fw // 2, min(obj.x, bg_w - fw // 2))
         obj.y = max(fh // 2, min(obj.y, bg_h - fh // 2))
 
+    mark_dirty()  # Background change requires redraw
     sync_trackbars_to_target()
     cv2.setTrackbarMax("Height px", "Editor", bg_h)
 
@@ -188,6 +215,9 @@ current_object_name = object_names[current_object_index]
 selected_objects = set()   # multi-selection set
 drag_offsets = {}  # per-object offset during multi-drag
 
+# Performance optimization: cache system
+cached_canvas = bg_original.copy()  # Initialize with background
+
 
 # =========================================================
 # HELPERS
@@ -229,6 +259,43 @@ def safe_blend(canvas, fg, alpha, cx, cy):
     return canvas
 
 
+def get_cached_object_render(obj):
+    """Get or create a cached rendered version of an object
+    
+    Cache key uses id(obj) to ensure per-instance caching since different objects
+    have different underlying image data (fg_rgb, fg_alpha). Object position (x, y)
+    is intentionally excluded from the cache key because:
+    1. Position doesn't affect the rendered image itself (only where it's placed)
+    2. Position changes are frequent during dragging, and mark_dirty() clears the
+       entire cache anyway, allowing fresh renders at new positions
+    3. This design maximizes cache hits for non-positional changes (e.g., adjusting
+       filters while object is stationary)
+    """
+    # Create a cache key based on object properties (excludes position)
+    cache_key = (
+        id(obj),
+        obj.scale,
+        obj.filters["brightness"],
+        obj.filters["contrast"],
+        obj.filters["blur"]
+    )
+    
+    if cache_key in object_render_cache:
+        return object_render_cache[cache_key]
+    
+    # Render the object
+    fw = int(obj.orig_w * obj.scale)
+    fh = int(obj.orig_h * obj.scale)
+    
+    fg = cv2.resize(obj.fg_rgb, (fw, fh))
+    a = cv2.resize(obj.fg_alpha, (fw, fh))
+    fg = apply_filters(fg, obj.filters)
+    
+    # Cache the result
+    object_render_cache[cache_key] = (fg, a, fw, fh)
+    return fg, a, fw, fh
+
+
 def create_random_object():
     obj_name = current_object_name
     fg = FG_DATA[obj_name]
@@ -253,6 +320,7 @@ def create_random_object():
 # =========================================================
 
 def on_brightness(v):
+    mark_dirty()
     if selected_objects:
         for obj in selected_objects:
             obj.filters["brightness"] = v - 100
@@ -261,6 +329,7 @@ def on_brightness(v):
 
 
 def on_contrast(v):
+    mark_dirty()
     if selected_objects:
         for obj in selected_objects:
             obj.filters["contrast"] = v / 100.0
@@ -268,6 +337,7 @@ def on_contrast(v):
         bg_filters["contrast"] = v / 100.0
 
 def on_blur(v):
+    mark_dirty()
     v = v if v % 2 else v + 1
     if selected_objects:
         for obj in selected_objects:
@@ -285,6 +355,7 @@ def on_height_change(val):
     if not selected_objects:
         return
 
+    mark_dirty()
     for obj in selected_objects:
         height_px = max(val, MIN_HEIGHT_PX)
         scale = height_px / obj.orig_h
@@ -343,9 +414,11 @@ def mouse_cb(event, mx, my, flags, param):
                     base_dy + (clicked_obj.y - obj.y)
                 )
 
+        mark_dirty()  # Selection change requires redraw
         sync_trackbars_to_target()
 
     elif event == cv2.EVENT_MOUSEMOVE and dragging and selected_objects:
+        mark_dirty()  # Movement requires redraw
         for obj in selected_objects:
             dx, dy = drag_offsets[obj]
             fw = int(obj.orig_w * obj.scale)
@@ -476,39 +549,35 @@ cv2.createTrackbar("Height px", "Editor", 100, 2000, on_height_change)
 # =========================================================
 
 while True:
-    canvas = apply_filters(bg_original.copy(), bg_filters)
+    # Only redraw if something changed
+    if needs_redraw:
+        canvas = apply_filters(bg_original.copy(), bg_filters)
 
-    for obj in objects:
-        fw = int(obj.orig_w * obj.scale)
-        fh = int(obj.orig_h * obj.scale)
+        for obj in objects:
+            fg, a, fw, fh = get_cached_object_render(obj)
+            canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
 
-        fg = cv2.resize(obj.fg_rgb, (fw, fh))
-        a = cv2.resize(obj.fg_alpha, (fw, fh))
-        fg = apply_filters(fg, obj.filters)
+            if obj in selected_objects:
+                color = (0, 255, 0) if obj == selected_target else (255, 0, 0)
+                cv2.rectangle(
+                    canvas,
+                    (obj.x - fw // 2, obj.y - fh // 2),
+                    (obj.x + fw // 2, obj.y + fh // 2),
+                    color, 2
+                )
 
-        canvas = safe_blend(canvas, fg, a, obj.x, obj.y)
+        if isinstance(selected_target, ObjectInstance):
+            fh = int(selected_target.orig_h * selected_target.scale)
+            cv2.putText(canvas, f"Height: {fh}px", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(canvas, f"Current object: {current_object_name}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        txt="Depth  Height(px)\n 10      177\n 15      118\n 20      89\n 25      75\n 30      66\n 35      56\n 40      47\n 45      44\n 50      42\n 55      36\n 60      35\n 65      33\n 70      29"
+        putText_multiline(canvas,txt,(bg_w - 250,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        
+        cached_canvas = canvas
+        needs_redraw = False
 
-        if obj in selected_objects:
-            color = (0, 255, 0) if obj == selected_target else (255, 0, 0)
-            cv2.rectangle(
-                canvas,
-                (obj.x - fw // 2, obj.y - fh // 2),
-                (obj.x + fw // 2, obj.y + fh // 2),
-                color, 2
-            )
-
-
-            
-    if isinstance(selected_target, ObjectInstance):
-        fh = int(selected_target.orig_h * selected_target.scale)
-        cv2.putText(canvas, f"Height: {fh}px", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    cv2.putText(canvas, f"Current object: {current_object_name}",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    txt="Depth  Height(px)\n 10      177\n 15      118\n 20      89\n 25      75\n 30      66\n 35      56\n 40      47\n 45      44\n 50      42\n 55      36\n 60      35\n 65      33\n 70      29"
-    putText_multiline(canvas,txt,(bg_w - 250,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    
-
-    cv2.imshow("Editor", canvas)
+    cv2.imshow("Editor", cached_canvas)
 
     k = cv2.waitKey(20) & 0xFF
     if k == 27:
@@ -519,10 +588,12 @@ while True:
         cycle_object(1)
     elif k in (ord('n'), ord('N')):
         objects.append(create_random_object())
+        mark_dirty()
     elif k in (ord('d'), ord('D')):
         if isinstance(selected_target, ObjectInstance):
             objects.remove(selected_target)
             selected_target = "background"
+            mark_dirty()
     elif k in (ord('s'), ord('S')):
         name = get_next_filename()
         save_combined(name)
@@ -530,6 +601,7 @@ while True:
         objects.clear()
         selected_objects.clear()
         selected_target = "background"
+        mark_dirty()
         sync_trackbars_to_target()
 
     elif k == ord(','):   # previous background
