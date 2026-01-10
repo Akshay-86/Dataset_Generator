@@ -3,3 +3,10 @@ assets/videos
 assets/output
 myenv
 assets/Combined
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
