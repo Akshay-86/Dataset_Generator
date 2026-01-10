@@ -188,6 +188,7 @@ current_object_index = 0
 current_object_name = object_names[current_object_index]
 selected_objects = set()   # multi-selection set
 drag_offsets = {}  # per-object offset during multi-drag
+alt_pressed = False
 
 
 # =========================================================
@@ -250,28 +251,49 @@ def create_random_object():
 
 def rotate_image_keep_alpha(img, alpha, angle_deg):
     """
-    Rotate RGBA components around center, keeping size.
+    Rotate image & alpha without clipping by expanding canvas.
     """
     h, w = img.shape[:2]
-    center = (w // 2, h // 2)
+    angle_rad = np.deg2rad(angle_deg)
 
-    M = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+    # Compute new bounding box size
+    cos = abs(np.cos(angle_rad))
+    sin = abs(np.sin(angle_rad))
+
+    new_w = int(w * cos + h * sin)
+    new_h = int(w * sin + h * cos)
+
+    # Rotation matrix around center
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, 1.0)
+
+    # Adjust translation to center new image
+    M[0, 2] += (new_w - w) / 2
+    M[1, 2] += (new_h - h) / 2
 
     rotated_img = cv2.warpAffine(
-        img, M, (w, h),
+        img, M, (new_w, new_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0)
     )
 
     rotated_alpha = cv2.warpAffine(
-        alpha, M, (w, h),
+        alpha, M, (new_w, new_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0
     )
 
     return rotated_img, rotated_alpha
+
+def draw_rotated_bbox(img, cx, cy, w, h, angle_deg, color, thickness=2):
+    """
+    Draw a rotated rectangle (visual bounding box).
+    """
+    rect = ((cx, cy), (w, h), angle_deg)
+    box = cv2.boxPoints(rect)
+    box = np.int32(box)
+    cv2.polylines(img, [box], isClosed=True, color=color, thickness=thickness)
 
 
 
@@ -327,14 +349,14 @@ def on_rotation_change(val):
     if is_syncing_ui:
         return
 
-    angle = val - 180  # map to [-180, +180]
+    angle = val - 180
 
-    if isinstance(selected_target, ObjectInstance):
+    # Rotate all selected ONLY if more than one selected
+    if len(selected_objects) > 1:
+        for obj in selected_objects:
+            obj.rotation = angle
+    elif isinstance(selected_target, ObjectInstance):
         selected_target.rotation = angle
-
-
-
-
 
 
 # =========================================================
@@ -556,12 +578,7 @@ while True:
 
         if obj in selected_objects:
             color = (0, 255, 0) if obj == selected_target else (255, 0, 0)
-            cv2.rectangle(
-                canvas,
-                (obj.x - fw // 2, obj.y - fh // 2),
-                (obj.x + fw // 2, obj.y + fh // 2),
-                color, 2
-            )
+            draw_rotated_bbox(canvas, obj.x, obj.y, fw, fh, -obj.rotation, color, 2)
 
 
             
@@ -600,7 +617,6 @@ while True:
 
     elif k == ord(','):   # previous background
         cycle_background(-1)
-
     elif k == ord('.'):   # next background
         cycle_background(1)
 
