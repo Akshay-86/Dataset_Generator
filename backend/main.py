@@ -89,6 +89,15 @@ needs_redraw = True
 def mark_dirty():
     """Mark that the canvas needs to be redrawn
     
+    This function should be called whenever any visual change occurs that requires
+    re-rendering the canvas. Common triggering events include:
+    - Object movement (mouse drag)
+    - Filter changes (brightness, contrast, blur)
+    - Object creation or deletion
+    - Selection changes
+    - Background changes
+    - Object scale/size changes
+    
     Note: We clear the entire object_render_cache for simplicity and correctness.
     While selective invalidation could be more efficient, full clearing ensures
     no stale cached renders are used and the performance impact is negligible
@@ -253,11 +262,16 @@ def safe_blend(canvas, fg, alpha, cx, cy):
 def get_cached_object_render(obj):
     """Get or create a cached rendered version of an object
     
-    Note: Cache key includes id(obj) to ensure each object instance has its own cache entry.
-    This is intentional as different objects shouldn't share cached renders even if they have
-    identical properties, since the underlying image data (fg_rgb, fg_alpha) is different.
+    Cache key uses id(obj) to ensure per-instance caching since different objects
+    have different underlying image data (fg_rgb, fg_alpha). Object position (x, y)
+    is intentionally excluded from the cache key because:
+    1. Position doesn't affect the rendered image itself (only where it's placed)
+    2. Position changes are frequent during dragging, and mark_dirty() clears the
+       entire cache anyway, allowing fresh renders at new positions
+    3. This design maximizes cache hits for non-positional changes (e.g., adjusting
+       filters while object is stationary)
     """
-    # Create a cache key based on object properties
+    # Create a cache key based on object properties (excludes position)
     cache_key = (
         id(obj),
         obj.scale,

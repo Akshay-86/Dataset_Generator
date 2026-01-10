@@ -40,6 +40,11 @@ def load_cached_image(path):
     Returns a copy of the cached image to prevent accidental modification of cached data.
     The copy overhead is negligible compared to disk I/O savings, and ensures correctness
     as callers may apply filters or other modifications to the returned image.
+    
+    Note: This cache has no size limit. For the typical use case (batch processing a
+    fixed set of scene images), this is acceptable. For long-running processes with
+    many unique images, consider implementing an LRU cache with size limits to prevent
+    unbounded memory growth.
     """
     if path not in _image_cache:
         img = cv2.imread(path)
